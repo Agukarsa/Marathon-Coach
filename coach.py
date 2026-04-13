@@ -1,9 +1,6 @@
 import os
 import asyncio
 import logging
-import schedule
-import time
-import threading
 from datetime import date, timedelta
 from telegram import Bot, Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -146,36 +143,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(respuesta, parse_mode=ParseMode.MARKDOWN)
 
 
-async def enviar_telegram(mensaje: str):
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+async def tarea_programada(bot: Bot, tipo: str):
+    datos = get_garmin_data()
+    mensaje = generar_mensaje_programado(datos, tipo) if datos else f"No pude conectarme a Garmin esta {'mañana' if tipo == 'manana' else 'noche'}."
     try:
         await bot.send_message(chat_id=CHAT_ID, text=mensaje, parse_mode=ParseMode.MARKDOWN)
-        logger.info("Mensaje programado enviado OK")
+        logger.info(f"Tarea {tipo} enviada OK")
     except Exception as e:
-        logger.error(f"Error enviando a Telegram: {e}")
+        logger.error(f"Error enviando tarea {tipo}: {e}")
 
 
-def tarea_manana():
-    logger.info("Ejecutando tarea de la mañana...")
-    datos = get_garmin_data()
-    mensaje = generar_mensaje_programado(datos, "manana") if datos else "No pude conectarme a Garmin esta mañana."
-    asyncio.run(enviar_telegram(mensaje))
-
-
-def tarea_noche():
-    logger.info("Ejecutando tarea de la noche...")
-    datos = get_garmin_data()
-    mensaje = generar_mensaje_programado(datos, "noche") if datos else "No pude conectarme a Garmin esta noche."
-    asyncio.run(enviar_telegram(mensaje))
-
-
-def correr_scheduler():
-    schedule.every().day.at("12:30").do(tarea_manana)   # 9:30 AM Argentina
-    schedule.every().day.at("22:00").do(tarea_noche)    # 19:00 Argentina
+async def scheduler_loop(bot: Bot):
+    """Scheduler async — corre dentro del mismo event loop que el bot."""
+    import datetime
     logger.info("Scheduler activo: 9:30AM y 19:00 hora Argentina")
+    manana_enviada = False
+    noche_enviada  = False
+
     while True:
-        schedule.run_pending()
-        time.sleep(60)
+        # Hora actual en Argentina (UTC-3)
+        ahora_utc = datetime.datetime.utcnow()
+        ahora_arg = ahora_utc - datetime.timedelta(hours=3)
+        hora = ahora_arg.hour
+        minuto = ahora_arg.minute
+        dia = ahora_arg.date()
+
+        # Reset diario a medianoche
+        if hora == 0 and minuto == 0:
+            manana_enviada = False
+            noche_enviada  = False
+
+        # 9:30 AM Argentina
+        if hora == 9 and minuto >= 30 and not manana_enviada:
+            logger.info("Enviando mensaje de la mañana...")
+            await tarea_programada(bot, "manana")
+            manana_enviada = True
+
+        # 19:00 Argentina
+        if hora == 19 and minuto == 0 and not noche_enviada:
+            logger.info("Enviando mensaje de la noche...")
+            await tarea_programada(bot, "noche")
+            noche_enviada = True
+
+        await asyncio.sleep(60)
 
 
 async def main():
@@ -196,14 +206,17 @@ async def main():
         parse_mode=ParseMode.MARKDOWN
     )
 
-    t = threading.Thread(target=correr_scheduler, daemon=True)
-    t.start()
-
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=["message"], drop_pending_updates=True)
+
     logger.info("Bot escuchando mensajes entrantes...")
-    await app.run_polling(allowed_updates=["message"], drop_pending_updates=True)
+
+    # Correr scheduler en el mismo event loop
+    await scheduler_loop(bot)
 
 
 if __name__ == "__main__":
