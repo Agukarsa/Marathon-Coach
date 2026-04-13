@@ -215,7 +215,7 @@ if __name__ == "__main__":
     schedule.every().day.at("10:00").do(tarea_manana)   # 9:30 AM Argentina
     schedule.every().day.at("00:00").do(tarea_noche)    # 16:00 Argentina
 
-    logger.info("Scheduler activo: 7AM y 21:00 hora Argentina")
+    logger.info("Scheduler activo: 9:30AM y 19:00 hora Argentina")
 
     while True:
         schedule.run_pending()
