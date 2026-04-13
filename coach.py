@@ -3,8 +3,10 @@ import asyncio
 import logging
 import schedule
 import time
+import threading
 from datetime import date, timedelta
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 import anthropic
 import garminconnect
@@ -49,7 +51,6 @@ Fases del plan:
 # ── Funciones Garmin ───────────────────────────────────────────────────────────
 
 def get_garmin_data():
-    """Conecta a Garmin y obtiene datos del día actual y ayer."""
     try:
         garmin = garminconnect.Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
         garmin.login()
@@ -57,10 +58,8 @@ def get_garmin_data():
 
         today     = str(date.today())
         yesterday = str(date.today() - timedelta(days=1))
-
         data = {}
 
-        # Última actividad
         try:
             activities = garmin.get_activities(0, 3)
             if activities:
@@ -69,7 +68,6 @@ def get_garmin_data():
                     "tipo":      activities[0].get("activityType", {}).get("typeKey", ""),
                     "distancia": round(activities[0].get("distance", 0) / 1000, 2),
                     "duracion":  round(activities[0].get("duration", 0) / 60, 1),
-                    "pace_medio": activities[0].get("averageSpeed", 0),
                     "fc_media":  activities[0].get("averageHR", 0),
                     "fc_max":    activities[0].get("maxHR", 0),
                     "carga":     activities[0].get("activityTrainingLoad", 0),
@@ -78,48 +76,34 @@ def get_garmin_data():
         except Exception as e:
             logger.warning(f"No se pudo obtener actividad: {e}")
 
-        # HRV
         try:
             hrv = garmin.get_hrv_data(today)
             if hrv:
                 data["hrv"] = {
                     "hrv_nocturno": hrv.get("hrvSummary", {}).get("lastNight", 0),
-                    "hrv_5min":     hrv.get("hrvSummary", {}).get("lastNight5MinHigh", 0),
                     "estado":       hrv.get("hrvSummary", {}).get("status", ""),
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener HRV: {e}")
 
-        # Sueño
         try:
             sleep = garmin.get_sleep_data(yesterday)
             if sleep:
                 sd = sleep.get("dailySleepDTO", {})
                 data["sueno"] = {
-                    "duracion_hs":  round(sd.get("sleepTimeSeconds", 0) / 3600, 1),
-                    "profundo_hs":  round(sd.get("deepSleepSeconds", 0) / 3600, 1),
-                    "score":        sd.get("sleepScores", {}).get("overall", {}).get("value", 0),
+                    "duracion_hs": round(sd.get("sleepTimeSeconds", 0) / 3600, 1),
+                    "score":       sd.get("sleepScores", {}).get("overall", {}).get("value", 0),
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener sueño: {e}")
 
-        # Estado de entrenamiento
-        try:
-            ts = garmin.get_training_status(today)
-            if ts:
-                data["estado_entrenamiento"] = ts
-        except Exception as e:
-            logger.warning(f"No se pudo obtener training status: {e}")
-
-        # Estadísticas semanales
         try:
             week_start = str(date.today() - timedelta(days=date.today().weekday()))
             week_acts  = garmin.get_activities_by_date(week_start, today, "running")
             if week_acts:
-                km_semana = sum(a.get("distance", 0) for a in week_acts) / 1000
                 data["semana_actual"] = {
-                    "km_totales":    round(km_semana, 1),
-                    "sesiones":      len(week_acts),
+                    "km_totales": round(sum(a.get("distance", 0) for a in week_acts) / 1000, 1),
+                    "sesiones":   len(week_acts),
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener stats semanales: {e}")
@@ -133,90 +117,117 @@ def get_garmin_data():
 
 # ── Funciones Claude ───────────────────────────────────────────────────────────
 
-def generar_mensaje_coach(datos_garmin: dict, tipo: str) -> str:
-    """Llama a Claude para generar el mensaje del coach."""
+def llamar_claude(mensajes: list) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    if tipo == "manana":
-        instruccion = f"""Es la mañana. Analizá estos datos de Garmin y generá el mensaje del coach para arrancar el día.
-Datos: {datos_garmin}
-El mensaje debe incluir: estado de recuperación (HRV + sueño), recomendación para el entrenamiento de hoy, y motivación."""
-    else:
-        instruccion = f"""Es la noche. Analizá estos datos de Garmin y generá el resumen del día.
-Datos: {datos_garmin}
-El mensaje debe incluir: análisis del entrenamiento de hoy (si hubo), progreso semanal, y consejo para mañana."""
-
     try:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1000,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": instruccion}]
+            messages=mensajes
         )
         return response.content[0].text
     except Exception as e:
         logger.error(f"Error con Claude: {e}")
-        return "No pude generar el análisis hoy. Revisá los logs en Railway."
+        return "No pude procesar eso ahora. Intentá de nuevo en un momento."
 
 
-# ── Envío a Telegram ───────────────────────────────────────────────────────────
+def generar_mensaje_programado(datos_garmin: dict, tipo: str) -> str:
+    if tipo == "manana":
+        instruccion = f"""Es la mañana. Analizá estos datos de Garmin y generá el mensaje del coach para arrancar el día.
+Datos: {datos_garmin}
+Incluí: estado de recuperación (HRV + sueño), recomendación para el entrenamiento de hoy, y motivación."""
+    else:
+        instruccion = f"""Es la noche. Analizá estos datos de Garmin y generá el resumen del día.
+Datos: {datos_garmin}
+Incluí: análisis del entrenamiento de hoy (si hubo), progreso semanal, y consejo para mañana."""
+    return llamar_claude([{"role": "user", "content": instruccion}])
+
+
+# ── Telegram — mensajes entrantes ─────────────────────────────────────────────
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_chat.id) != CHAT_ID:
+        return
+
+    user_text = update.message.text
+    logger.info(f"Mensaje recibido: {user_text}")
+
+    datos = get_garmin_data()
+    contexto_garmin = f"\n\nDatos actuales de Garmin del atleta: {datos}" if datos else ""
+
+    respuesta = llamar_claude([
+        {"role": "user", "content": f"{user_text}{contexto_garmin}"}
+    ])
+
+    await update.message.reply_text(respuesta, parse_mode=ParseMode.MARKDOWN)
+
+
+# ── Envío programado ───────────────────────────────────────────────────────────
 
 async def enviar_telegram(mensaje: str):
-    """Envía un mensaje al bot de Telegram."""
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=mensaje,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        logger.info("Mensaje enviado a Telegram OK")
+        await bot.send_message(chat_id=CHAT_ID, text=mensaje, parse_mode=ParseMode.MARKDOWN)
+        logger.info("Mensaje programado enviado OK")
     except Exception as e:
         logger.error(f"Error enviando a Telegram: {e}")
 
 
-# ── Tareas programadas ─────────────────────────────────────────────────────────
-
 def tarea_manana():
     logger.info("Ejecutando tarea de la mañana...")
     datos = get_garmin_data()
-    if datos:
-        mensaje = generar_mensaje_coach(datos, "manana")
-    else:
-        mensaje = "No pude conectarme a Garmin esta mañana. Revisá las credenciales en Railway."
+    mensaje = generar_mensaje_programado(datos, "manana") if datos else "No pude conectarme a Garmin esta mañana."
     asyncio.run(enviar_telegram(mensaje))
 
 
 def tarea_noche():
     logger.info("Ejecutando tarea de la noche...")
     datos = get_garmin_data()
-    if datos:
-        mensaje = generar_mensaje_coach(datos, "noche")
-    else:
-        mensaje = "No pude conectarme a Garmin esta noche. Revisá las credenciales en Railway."
+    mensaje = generar_mensaje_programado(datos, "noche") if datos else "No pude conectarme a Garmin esta noche."
     asyncio.run(enviar_telegram(mensaje))
+
+
+# ── Scheduler en thread separado ──────────────────────────────────────────────
+
+def correr_scheduler():
+    schedule.every().day.at("12:30").do(tarea_manana)   # 9:30 AM Argentina
+    schedule.every().day.at("22:00").do(tarea_noche)    # 19:00 Argentina
+    logger.info("Scheduler activo: 9:30AM y 19:00 hora Argentina")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+async def main():
     logger.info("Coach de maratón iniciado. Objetivo: Sub 3:30 en BSAS 20/09/2026")
 
-    # Mensaje de bienvenida al arrancar
-    async def bienvenida():
-        await enviar_telegram(
-            "✅ *Coach activo*\n\nHola Agukarsa, tu coach de maratón está corriendo.\n"
-            "Vas a recibir análisis a las *7:00 AM* y a las *21:00*.\n\n"
-            "Objetivo: Sub 3:30 · Maratón BSAS · 20/09/2026 💪"
-        )
-    asyncio.run(bienvenida())
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    await bot.send_message(
+        chat_id=CHAT_ID,
+        text=(
+            "✅ *Coach actualizado — modo chat activado*\n\n"
+            "Hola Agukarsa, ahora podés escribirme cuando quieras y te respondo con tus datos reales de Garmin.\n\n"
+            "Ejemplos:\n"
+            "— _¿Cómo estoy de recuperación hoy?_\n"
+            "— _¿Hago el tempo run o descanso?_\n"
+            "— _¿Cómo voy en relación al plan?_\n\n"
+            "Análisis automáticos: *9:30 AM* y *19:00* 💪"
+        ),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-    # Programar las dos tareas diarias (hora UTC — Argentina es UTC-3)
-    schedule.every().day.at("10:00").do(tarea_manana)   # 9:30 AM Argentina
-    schedule.every().day.at("00:00").do(tarea_noche)    # 16:00 Argentina
+    t = threading.Thread(target=correr_scheduler, daemon=True)
+    t.start()
 
-    logger.info("Scheduler activo: 9:30AM y 19:00 hora Argentina")
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    logger.info("Bot escuchando mensajes entrantes...")
+    await app.run_polling(allowed_updates=["message"])
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
