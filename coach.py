@@ -14,7 +14,6 @@ import garminconnect
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── Configuración ──────────────────────────────────────────────────────────────
 GARMIN_EMAIL       = os.environ["GARMIN_EMAIL"]
 GARMIN_PASSWORD    = os.environ["GARMIN_PASSWORD"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -48,18 +47,15 @@ Fases del plan:
 - Sem 13-16: Peak — rodajes largos de 28-35km, simulacros de maratón
 - Sem 17-18: Tapering — reducción de volumen, frescura para la carrera"""
 
-# ── Funciones Garmin ───────────────────────────────────────────────────────────
 
 def get_garmin_data():
     try:
         garmin = garminconnect.Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
         garmin.login()
         logger.info("Conectado a Garmin OK")
-
         today     = str(date.today())
         yesterday = str(date.today() - timedelta(days=1))
         data = {}
-
         try:
             activities = garmin.get_activities(0, 3)
             if activities:
@@ -75,7 +71,6 @@ def get_garmin_data():
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener actividad: {e}")
-
         try:
             hrv = garmin.get_hrv_data(today)
             if hrv:
@@ -85,7 +80,6 @@ def get_garmin_data():
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener HRV: {e}")
-
         try:
             sleep = garmin.get_sleep_data(yesterday)
             if sleep:
@@ -96,7 +90,6 @@ def get_garmin_data():
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener sueño: {e}")
-
         try:
             week_start = str(date.today() - timedelta(days=date.today().weekday()))
             week_acts  = garmin.get_activities_by_date(week_start, today, "running")
@@ -107,15 +100,11 @@ def get_garmin_data():
                 }
         except Exception as e:
             logger.warning(f"No se pudo obtener stats semanales: {e}")
-
         return data
-
     except Exception as e:
         logger.error(f"Error conectando a Garmin: {e}")
         return None
 
-
-# ── Funciones Claude ───────────────────────────────────────────────────────────
 
 def llamar_claude(mensajes: list) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -144,26 +133,18 @@ Incluí: análisis del entrenamiento de hoy (si hubo), progreso semanal, y conse
     return llamar_claude([{"role": "user", "content": instruccion}])
 
 
-# ── Telegram — mensajes entrantes ─────────────────────────────────────────────
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != CHAT_ID:
         return
-
     user_text = update.message.text
     logger.info(f"Mensaje recibido: {user_text}")
-
     datos = get_garmin_data()
     contexto_garmin = f"\n\nDatos actuales de Garmin del atleta: {datos}" if datos else ""
-
     respuesta = llamar_claude([
         {"role": "user", "content": f"{user_text}{contexto_garmin}"}
     ])
-
     await update.message.reply_text(respuesta, parse_mode=ParseMode.MARKDOWN)
 
-
-# ── Envío programado ───────────────────────────────────────────────────────────
 
 async def enviar_telegram(mensaje: str):
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -188,8 +169,6 @@ def tarea_noche():
     asyncio.run(enviar_telegram(mensaje))
 
 
-# ── Scheduler en thread separado ──────────────────────────────────────────────
-
 def correr_scheduler():
     schedule.every().day.at("12:30").do(tarea_manana)   # 9:30 AM Argentina
     schedule.every().day.at("22:00").do(tarea_noche)    # 19:00 Argentina
@@ -199,8 +178,6 @@ def correr_scheduler():
         time.sleep(60)
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 async def main():
     logger.info("Coach de maratón iniciado. Objetivo: Sub 3:30 en BSAS 20/09/2026")
 
@@ -208,8 +185,8 @@ async def main():
     await bot.send_message(
         chat_id=CHAT_ID,
         text=(
-            "✅ *Coach actualizado — modo chat activado*\n\n"
-            "Hola Agukarsa, ahora podés escribirme cuando quieras y te respondo con tus datos reales de Garmin.\n\n"
+            "✅ *Coach listo — escribime cuando quieras*\n\n"
+            "Hola Agukarsa, el chat bidireccional está activo.\n\n"
             "Ejemplos:\n"
             "— _¿Cómo estoy de recuperación hoy?_\n"
             "— _¿Hago el tempo run o descanso?_\n"
@@ -226,7 +203,7 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot escuchando mensajes entrantes...")
-    await app.run_polling(allowed_updates=["message"])
+    await app.run_polling(allowed_updates=["message"], drop_pending_updates=True)
 
 
 if __name__ == "__main__":
