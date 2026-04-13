@@ -212,8 +212,8 @@ if __name__ == "__main__":
     asyncio.run(bienvenida())
 
     # Programar las dos tareas diarias (hora UTC — Argentina es UTC-3)
-    schedule.every().day.at("10:00").do(tarea_manana)   # 7:00 AM Argentina
-    schedule.every().day.at("00:00").do(tarea_noche)    # 21:00 Argentina
+    schedule.every().day.at("10:00").do(tarea_manana)   # 9:30 AM Argentina
+    schedule.every().day.at("00:00").do(tarea_noche)    # 16:00 Argentina
 
     logger.info("Scheduler activo: 7AM y 21:00 hora Argentina")
 
