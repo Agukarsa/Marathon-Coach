@@ -1,0 +1,4 @@
+garminconnect
+python-telegram-bot
+anthropic
+schedule
