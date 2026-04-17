@@ -1,1 +1,1 @@
-worker: python coach.py
+worker: sleep infinity
